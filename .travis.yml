@@ -26,7 +26,7 @@ matrix:
   allow_failures:
   - go: tip
 
-before_deploy: "ls -la $GOPATH"
+before_deploy: "./scripts/generate_bintray.sh > .bintray"
 deploy:
   skip_cleanup: true
   provider: bintray
