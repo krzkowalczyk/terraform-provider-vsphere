@@ -28,6 +28,7 @@ matrix:
 
 before_deploy: "ls -la $GOPATH"
 deploy:
+  skip_cleanup: true
   provider: bintray
   file: ".bintray"
   user: "krzkowalczyk"

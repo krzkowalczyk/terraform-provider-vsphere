@@ -4,8 +4,7 @@ GOFMT_FILES?=$$(find . -name '*.go' |grep -v vendor)
 default: build
 
 build: fmtcheck
-	go install
-	ls -la $$GOPATH/bin
+	go build
 
 test: fmtcheck
 	go test -i $(TEST) || exit 1
@@ -45,4 +44,3 @@ test-compile:
 	go test -c $(TEST) $(TESTARGS)
 
 .PHONY: build test testacc vet fmt fmtcheck errcheck vendor-status test-compile
-
