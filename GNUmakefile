@@ -5,6 +5,7 @@ default: build
 
 build: fmtcheck
 	go install
+	ls -la
 
 test: fmtcheck
 	go test -i $(TEST) || exit 1
