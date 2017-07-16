@@ -1,7 +1,8 @@
 {
     "package": {
-        "name": "terraform-provider-test",
+        "name": "terraform-provider-vsphere",
         "repo": "binary",
+        "subject": "krzkowalczyk",
         "desc": "I was pushed completely automatically",
         "website_url": "www.jfrog.com",
         "vcs_url": "https://github.com/krzkowalczyk/terraform-provider-vsphere",
