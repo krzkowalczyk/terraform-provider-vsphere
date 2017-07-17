@@ -4,9 +4,6 @@
 DATE=`date +%Y-%m-%d`
 VERSION=`git describe --always --long`
 
-echo $VERSION
-echo $DATE
-
 #define the template.
 cat  << EOF
 {
