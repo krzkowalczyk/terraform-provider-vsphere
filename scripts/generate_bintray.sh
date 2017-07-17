@@ -2,7 +2,11 @@
 
 #define parameters which are passed in.
 DATE=`date +%Y-%m-%d`
-VERSION=`cat ../CHANGELOG.md | grep Unreleased | awk -F " " '{print $2}'`
+VERSION=`git describe --always --long`
+
+echo $VERSION
+echo $DATE
+
 #define the template.
 cat  << EOF
 {
@@ -13,15 +17,15 @@ cat  << EOF
     },
 
     "version": {
-        "name": "$VERSION-$TRAVIS_COMMIT",
-        "desc": "This is a version $VERSION-$TRAVIS_COMMIT",
+        "name": "$VERSION",
+        "desc": "This is a version $VERSION",
         "released": "$DATE",
         "gpgSign": false
     },
 
     "files":
         [
-        {"includePattern": "terraform-provider-vsphere", "uploadPattern": "terraform-provider-vsphere/$VERSION/$TRAVIS_COMMIT/terraform-provider-vsphere"}
+        {"includePattern": "terraform-provider-vsphere", "uploadPattern": "terraform-provider-vsphere/$VERSION/terraform-provider-vsphere"}
         ],
     "publish": true
 }
