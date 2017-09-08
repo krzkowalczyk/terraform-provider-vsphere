@@ -34,6 +34,7 @@ resource "vsphere_virtual_machine" "web" {
 ```hcl
 resource "vsphere_virtual_machine" "lb" {
   name          = "lb01"
+  hostname      = "lbalancer01"
   folder        = "Loadbalancers"
   vcpu          = 2
   memory        = 4096
@@ -64,6 +65,7 @@ The following arguments are supported:
 * `folder` - (Optional) The folder to group the VM in.
 * `vcpu` - (Required) The number of virtual CPUs to allocate to the virtual machine
 * `memory` - (Required) The amount of RAM (in MB) to allocate to the virtual machine
+* `hostname` - (Optional) The virtual machine hostname used during the OS customization. Defaults to the `name` attribute.
 * `memory_reservation` - (Optional) The amount of RAM (in MB) to reserve physical memory resource; defaults to 0 (means not to reserve)
 * `datacenter` - (Optional) The name of a Datacenter in which to launch the virtual machine
 * `cluster` - (Optional) Name of a Cluster in which to launch the virtual machine
@@ -82,6 +84,7 @@ The following arguments are supported:
 * `enable_disk_uuid` - (Optional) This option causes the vm to mount disks by uuid on the guest OS.
 * `custom_configuration_parameters` - (Optional) Map of values that is set as virtual machine custom configurations.
 * `skip_customization` - (Optional) skip virtual machine customization (useful if OS is not in the guest OS support matrix of VMware like "other3xLinux64Guest").
+* `annotation` - (Optional) Edit the annotation notes field
 
 The `network_interface` block supports:
 

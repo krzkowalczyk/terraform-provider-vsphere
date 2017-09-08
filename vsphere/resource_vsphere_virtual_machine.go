@@ -78,6 +78,7 @@ type memoryAllocation struct {
 
 type virtualMachine struct {
 	name                  string
+	hostname              string
 	folder                string
 	datacenter            string
 	cluster               string
@@ -86,6 +87,7 @@ type virtualMachine struct {
 	vcpu                  int32
 	memoryMb              int64
 	memoryAllocation      memoryAllocation
+	annotation            string
 	template              string
 	networkInterfaces     []networkInterface
 	hardDisks             []hardDisk
@@ -132,6 +134,12 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 				ForceNew: true,
 			},
 
+			"hostname": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
+
 			"folder": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
@@ -153,6 +161,11 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 				Optional: true,
 				Default:  0,
 				ForceNew: true,
+			},
+
+			"annotation": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
 			},
 
 			"datacenter": &schema.Schema{
@@ -289,6 +302,11 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 				ForceNew: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
+						"key": &schema.Schema{
+							Type:     schema.TypeInt,
+							Computed: true,
+						},
+
 						"label": &schema.Schema{
 							Type:     schema.TypeString,
 							Required: true,
@@ -310,9 +328,10 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 						},
 
 						"ipv4_address": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
+							Type:             schema.TypeString,
+							Optional:         true,
+							Computed:         true,
+							DiffSuppressFunc: suppressIpDifferences,
 						},
 
 						"ipv4_prefix_length": &schema.Schema{
@@ -322,16 +341,16 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 						},
 
 						"ipv4_gateway": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
+							Type:             schema.TypeString,
+							Optional:         true,
+							Computed:         true,
+							DiffSuppressFunc: suppressIpDifferences},
 
 						"ipv6_address": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
+							Type:             schema.TypeString,
+							Optional:         true,
+							Computed:         true,
+							DiffSuppressFunc: suppressIpDifferences},
 
 						"ipv6_prefix_length": &schema.Schema{
 							Type:     schema.TypeInt,
@@ -340,10 +359,10 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 						},
 
 						"ipv6_gateway": &schema.Schema{
-							Type:     schema.TypeString,
-							Optional: true,
-							Computed: true,
-						},
+							Type:             schema.TypeString,
+							Optional:         true,
+							Computed:         true,
+							DiffSuppressFunc: suppressIpDifferences},
 
 						"adapter_type": &schema.Schema{
 							Type:     schema.TypeString,
@@ -502,6 +521,11 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		configSpec.MemoryMB = int64(d.Get("memory").(int))
 		hasChanges = true
 		rebootRequired = true
+	}
+
+	if d.HasChange("annotation") {
+		configSpec.Annotation = d.Get("annotation").(string)
+		hasChanges = true
 	}
 
 	client := meta.(*govmomi.Client)
@@ -672,6 +696,10 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 		},
 	}
 
+	if v, ok := d.GetOk("hostname"); ok {
+		vm.hostname = v.(string)
+	}
+
 	if v, ok := d.GetOk("folder"); ok {
 		vm.folder = v.(string)
 	}
@@ -694,6 +722,12 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 
 	if v, ok := d.GetOk("time_zone"); ok {
 		vm.timeZone = v.(string)
+	}
+
+	if v, ok := d.GetOk("annotation"); ok {
+		vm.annotation = v.(string)
+	} else {
+		vm.annotation = ""
 	}
 
 	if v, ok := d.GetOk("linked_clone"); ok {
@@ -962,7 +996,7 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 
 	log.Printf("[DEBUG] Datacenter - %#v", dc)
 	log.Printf("[DEBUG] mvm.Summary.Config - %#v", mvm.Summary.Config)
-	log.Printf("[DEBUG] mvm.Summary.Config - %#v", mvm.Config)
+	log.Printf("[DEBUG] mvm.Config - %#v", mvm.Config)
 	log.Printf("[DEBUG] mvm.Guest.Net - %#v", mvm.Guest.Net)
 
 	err = d.Set("moid", mvm.Reference().Value)
@@ -1041,31 +1075,51 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 	}
 
 	networkInterfaces := make([]map[string]interface{}, 0)
+
+	deviceList := object.VirtualDeviceList(mvm.Config.Hardware.Device)
+	deviceList = deviceList.SelectByType((*types.VirtualEthernetCard)(nil))
+	log.Printf("[DEBUG] Device list %+v", deviceList)
+	for _, device := range deviceList {
+		networkInterface := make(map[string]interface{})
+		virtualDevice := device.GetVirtualDevice()
+		nic := device.(types.BaseVirtualEthernetCard)
+		DeviceName, _ := getNetworkName(client, vm, nic)
+		log.Printf("[DEBUG] device name %s", DeviceName)
+		networkInterface["label"] = DeviceName
+		networkInterface["mac_address"] = nic.GetVirtualEthernetCard().MacAddress
+		networkInterface["key"] = virtualDevice.Key
+		log.Printf("[DEBUG] networkInterface %#v", networkInterface)
+		networkInterfaces = append(networkInterfaces, networkInterface)
+	}
+	log.Printf("[DEBUG] networks: %#v", networkInterfaces)
+
 	for _, v := range mvm.Guest.Net {
 		if v.DeviceConfigId >= 0 {
 			log.Printf("[DEBUG] v.Network - %#v", v.Network)
-			networkInterface := make(map[string]interface{})
-			networkInterface["label"] = v.Network
-			networkInterface["mac_address"] = v.MacAddress
-			for _, ip := range v.IpConfig.IpAddress {
-				p := net.ParseIP(ip.IpAddress)
-				if p.To4() != nil {
-					log.Printf("[DEBUG] p.String - %#v", p.String())
-					log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
-					networkInterface["ipv4_address"] = p.String()
-					networkInterface["ipv4_prefix_length"] = ip.PrefixLength
-				} else if p.To16() != nil {
-					log.Printf("[DEBUG] p.String - %#v", p.String())
-					log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
-					networkInterface["ipv6_address"] = p.String()
-					networkInterface["ipv6_prefix_length"] = ip.PrefixLength
+			for _, networkInterface := range networkInterfaces {
+				if networkInterface["key"] == v.DeviceConfigId {
+					for _, ip := range v.IpConfig.IpAddress {
+						p := net.ParseIP(ip.IpAddress)
+						_, ok4 := networkInterface["ipv4_address"]
+						_, ok6 := networkInterface["ipv6_address"]
+						if p.To4() != nil && !ok4 {
+							log.Printf("[DEBUG] p.String - %#v", p.String())
+							log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
+							networkInterface["ipv4_address"] = p.String()
+							networkInterface["ipv4_prefix_length"] = ip.PrefixLength
+						} else if p.To4() == nil && p.To16() != nil && !ok6 && !p.IsLinkLocalUnicast() {
+							log.Printf("[DEBUG] p.String - %#v", p.String())
+							log.Printf("[DEBUG] ip.PrefixLength - %#v", ip.PrefixLength)
+							networkInterface["ipv6_address"] = p.String()
+							networkInterface["ipv6_prefix_length"] = ip.PrefixLength
+						}
+					}
+					log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
 				}
-				log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
 			}
-			log.Printf("[DEBUG] networkInterface: %#v", networkInterface)
-			networkInterfaces = append(networkInterfaces, networkInterface)
 		}
 	}
+	log.Printf("[DEBUG] networks: %#v", networkInterfaces)
 	if mvm.Guest.IpStack != nil {
 		for _, v := range mvm.Guest.IpStack {
 			if v.IpRouteConfig != nil && v.IpRouteConfig.IpRoute != nil {
@@ -1074,6 +1128,10 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 						gatewaySetting := ""
 						if route.Network == "::" {
 							gatewaySetting = "ipv6_gateway"
+							p := net.ParseIP(route.Gateway.IpAddress)
+							if p.To16() != nil && p.IsLinkLocalUnicast() {
+								continue
+							}
 						} else if route.Network == "0.0.0.0" {
 							gatewaySetting = "ipv4_gateway"
 						}
@@ -1136,6 +1194,7 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 	d.Set("cpu", mvm.Summary.Config.NumCpu)
 	d.Set("datastore", rootDatastore)
 	d.Set("uuid", mvm.Summary.Config.Uuid)
+	d.Set("annotation", mvm.Summary.Config.Annotation)
 
 	return nil
 }
@@ -1776,6 +1835,7 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		Flags: &types.VirtualMachineFlagInfo{
 			DiskUuidEnabled: &vm.enableDiskUUID,
 		},
+		Annotation: vm.annotation,
 	}
 	if vm.template == "" {
 		configSpec.GuestId = "otherLinux64Guest"
@@ -2065,9 +2125,13 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 
 			customIdentification := types.CustomizationIdentification{}
 
+			if len(vm.hostname) == 0 {
+				vm.hostname = vm.name
+			}
+
 			userData := types.CustomizationUserData{
 				ComputerName: &types.CustomizationFixedName{
-					Name: strings.Split(vm.name, ".")[0],
+					Name: strings.Split(vm.hostname, ".")[0],
 				},
 				ProductId: vm.windowsOptionalConfig.productKey,
 				FullName:  "terraform",
@@ -2096,9 +2160,14 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 				UserData:       userData,
 			}
 		} else {
+
+			if len(vm.hostname) == 0 {
+				vm.hostname = vm.name
+			}
+
 			identity_options = &types.CustomizationLinuxPrep{
 				HostName: &types.CustomizationFixedName{
-					Name: strings.Split(vm.name, ".")[0],
+					Name: strings.Split(vm.hostname, ".")[0],
 				},
 				Domain:     vm.domain,
 				TimeZone:   vm.timeZone,
@@ -2144,4 +2213,39 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		}
 	}
 	return nil
+}
+func getNetworkName(c *govmomi.Client, vm *object.VirtualMachine, nic types.BaseVirtualEthernetCard) (string, error) {
+	backingInfo := nic.GetVirtualEthernetCard().Backing
+	var deviceName string
+	switch backingInfo.(type) {
+	case *types.VirtualEthernetCardNetworkBackingInfo:
+		deviceName = backingInfo.(*types.VirtualEthernetCardNetworkBackingInfo).DeviceName
+		break
+	case *types.VirtualEthernetCardDistributedVirtualPortBackingInfo:
+		portInfo := backingInfo.(*types.VirtualEthernetCardDistributedVirtualPortBackingInfo).Port
+		log.Printf("network Port %#v", portInfo)
+		o := object.NewDistributedVirtualPortgroup(c.Client, types.ManagedObjectReference{
+			Type:  "DistributedVirtualPortgroup",
+			Value: portInfo.PortgroupKey,
+		})
+		var dvp mo.DistributedVirtualPortgroup
+		err := o.Properties(context.TODO(), o.Reference(), []string{"name", "config.distributedVirtualSwitch"}, &dvp)
+		if err != nil {
+			log.Printf("[ERROR]: Error retrieving portgroup %v", err)
+			return "", err
+		}
+		deviceName = dvp.Name
+	}
+	log.Printf("network Port DeviceName %#v", deviceName)
+	return deviceName, nil
+}
+
+// Suppress Diff on equal ip
+func suppressIpDifferences(k, old, new string, d *schema.ResourceData) bool {
+	o := net.ParseIP(old)
+	n := net.ParseIP(new)
+	if o != nil && n != nil {
+		return o.Equal(n)
+	}
+	return false
 }
