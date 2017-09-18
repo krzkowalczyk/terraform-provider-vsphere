@@ -16,11 +16,23 @@ script:
 - make test
 - make vendor-status
 - make vet
+- make build
 
-branches:
-  only:
-  - master
+# branches:
+#  only:
+#  - master
 matrix:
   fast_finish: true
   allow_failures:
   - go: tip
+
+before_deploy: "./scripts/generate_bintray.sh > .bintray"
+deploy:
+  skip_cleanup: true
+  provider: bintray
+  file: ".bintray"
+  user: "krzkowalczyk"
+  key:
+    secure: QmTKj+Oa77jcwLnMfioE0vw04Y2Q6Rx2H1p6IuJ5KUR4zHvNKKiha2zpPbNzPnwlSjVHGBalpNGG7p7+gwpmUtKtydB4lGO+ge9rcFTAmdiBnixcVQVq/U8F/zhmSKbt5dSMFR90mAQM/Khloj7pD/RXoieuEg/oIyXD0YqwbcNPQ4ULiFywCPO80bpXGPji9iuo9wNEQqXat/3RLKlUhPxTw+8UMoJoOsv7XSbSnlHNg7npFeSkvxYLC8KWAzcHx+z6IrxOCQfXgn5fp+AJ4tvMGd/iU3swjJ51LZ3d/PsvEo77PfDZi1/RR3ZUwE/cQLkJM1VTW9+DW0Zj0rA/bocgB/4JmUxOmNVY2pUkpAyQspSkNYTk1uczlKQ4CpMUg5sUEPagNFpWa56u/YNBuTxJ7ve3gNMQlBuxQVgykyRnqbjcNhqceRay91nhhAh+zKTPSiQfLF2qGDZGdrNAnhs4BJD6rvtTIYbCFUjskpQqKg8zCUskPVUxl+QBo4v3BgjtRJpa4yplSPQsRy8RzJxiJvwDyvhhCY+RZ5SfplfOr2qRstmqJ4+99E7eIe/7Iak3WrBEyldXlO5g51Cw2+MelknkL8cKnyh3sr2VsGKAfZBHfJrB3wWmebJY5+G8zo6/XrclmyU4cVZwtnGEv9r9zTU6355ASS96fSGf6jQ=
+  dry-run: false
+  on: dev
