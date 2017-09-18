@@ -9,14 +9,12 @@ import (
 
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/vmware/govmomi"
-	"github.com/vmware/govmomi/event"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
-	"time"
 )
 
 var DefaultDNSSuffixes = []string{
@@ -2214,53 +2212,6 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 			return err
 		}
 	}
-
-	var guest_mo mo.VirtualMachine
-	newVM.Properties(context.TODO(), newVM.Reference(), []string{"config.guestId"}, &guest_mo)
-	log.Printf("[DEBUG] GuestID = %v", guest_mo.Config.GuestId)
-
-	if !(vm.skipCustomization || vm.template == "" || !strings.HasPrefix(guest_mo.Config.GuestId, "win")) {
-		err = waitForCustomization(c, newVM, 3600, 10)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-func waitForCustomization(c *govmomi.Client, vm *object.VirtualMachine, timeout int, sleep_time int) error {
-	log.Printf("[DEBUG] VM wait for customization finish event")
-	var wait bool = true
-	var waited_seconds int = 0
-	for wait {
-		em := event.NewManager(c.Client)
-		filter := types.EventFilterSpec{
-			Entity: &types.EventFilterSpecByEntity{
-				Entity:    vm.Reference(),
-				Recursion: types.EventFilterSpecRecursionOptionSelf,
-			},
-			EventTypeId: []string{"CustomizationSucceeded"},
-		}
-		events, err := em.QueryEvents(context.TODO(), filter)
-		if err != nil {
-			return err
-		}
-
-		if len(events) > 0 {
-			log.Printf("[DEBUG] Customization event count = %v", len(events))
-			for _, event := range events {
-				log.Printf("[DEBUG] Customization event message = %v", event.GetEvent().FullFormattedMessage)
-			}
-			wait = false
-		} else if waited_seconds >= timeout {
-			return fmt.Errorf("[ERROR] Timeout waiting for customization.")
-		} else {
-			time.Sleep(time.Second * time.Duration(sleep_time))
-			waited_seconds += sleep_time
-			log.Printf("[DEBUG] Customization seconds waited: %v", waited_seconds)
-		}
-	}
-
 	return nil
 }
 func getNetworkName(c *govmomi.Client, vm *object.VirtualMachine, nic types.BaseVirtualEthernetCard) (string, error) {
