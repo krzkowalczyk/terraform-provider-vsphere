@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
@@ -1020,7 +1019,7 @@ resource "vsphere_virtual_machine" "vm" {
     type = "lazy"
     name = "${var.disk_name_lazy}"
   }
-  
+
 	disk {
     size = 1
     type = "thin"
