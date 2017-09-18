@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform/helper/validation"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -234,6 +235,12 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 				Default:  false,
 			},
 
+			"wait_for_guest_net": &schema.Schema{
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  true,
+			},
+
 			"enable_disk_uuid": &schema.Schema{
 				Type:     schema.TypeBool,
 				Optional: true,
@@ -249,6 +256,13 @@ func resourceVSphereVirtualMachine() *schema.Resource {
 			"moid": &schema.Schema{
 				Type:     schema.TypeString,
 				Computed: true,
+			},
+
+			"power_state": &schema.Schema{
+				Type:         schema.TypeString,
+				Optional:     true,
+				Default:      string(types.VirtualMachinePowerStatePoweredOn),
+				ValidateFunc: validation.StringInSlice([]string{string(types.VirtualMachinePowerStatePoweredOn)}, false),
 			},
 
 			"custom_configuration_parameters": &schema.Schema{
@@ -636,14 +650,16 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		}
 	}
 
-	// do nothing if there are no changes
-	if !hasChanges {
-		return nil
-	}
-
 	log.Printf("[DEBUG] virtual machine config spec: %v", configSpec)
 
-	if rebootRequired {
+	// We process power state changes here in addition to VM updates. The only
+	// "at rest" power state for a VM managed by Terraform is on, but depending
+	// on if the VM was powered off or not outside of Terraform, we need to
+	// handle rebootRequired in different ways.
+	o, _ := d.GetChange("power_state")
+	powerState := types.VirtualMachinePowerState(o.(string))
+
+	if rebootRequired && powerState != types.VirtualMachinePowerStatePoweredOff {
 		log.Printf("[INFO] Shutting down virtual machine: %s", d.Id())
 
 		task, err := vm.PowerOff(context.TODO())
@@ -657,20 +673,25 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		}
 	}
 
-	log.Printf("[INFO] Reconfiguring virtual machine: %s", d.Id())
+	// Perform reconfiguration tasks if we we have them
+	if hasChanges {
+		log.Printf("[INFO] Reconfiguring virtual machine: %s", d.Id())
 
-	task, err := vm.Reconfigure(context.TODO(), configSpec)
-	if err != nil {
-		log.Printf("[ERROR] %s", err)
+		task, err := vm.Reconfigure(context.TODO(), configSpec)
+		if err != nil {
+			log.Printf("[ERROR] %s", err)
+			return err
+		}
+
+		err = task.Wait(context.TODO())
+		if err != nil {
+			log.Printf("[ERROR] %s", err)
+			return err
+		}
 	}
 
-	err = task.Wait(context.TODO())
-	if err != nil {
-		log.Printf("[ERROR] %s", err)
-	}
-
-	if rebootRequired {
-		task, err = vm.PowerOn(context.TODO())
+	if rebootRequired || powerState != types.VirtualMachinePowerStatePoweredOn {
+		task, err := vm.PowerOn(context.TODO())
 		if err != nil {
 			return err
 		}
@@ -678,6 +699,17 @@ func resourceVSphereVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		err = task.Wait(context.TODO())
 		if err != nil {
 			log.Printf("[ERROR] %s", err)
+			return err
+		}
+
+		// Wait for VM guest networking before returning, so that Read can get
+		// accurate networking info for the state.
+		if d.Get("wait_for_guest_net").(bool) {
+			log.Printf("[DEBUG] Waiting for routeable guest network access")
+			if err := waitForGuestVMNet(client, vm); err != nil {
+				return err
+			}
+			log.Printf("[DEBUG] Guest has routeable network access.")
 		}
 	}
 
@@ -945,6 +977,24 @@ func resourceVSphereVirtualMachineCreate(d *schema.ResourceData, meta interface{
 	d.SetId(vm.Path())
 	log.Printf("[INFO] Created virtual machine: %s", d.Id())
 
+	newVM, err := virtualMachineFromManagedObjectID(client, vm.moid)
+	if err != nil {
+		return err
+	}
+	newProps, err := virtualMachineProperties(newVM)
+	if err != nil {
+		return err
+	}
+
+	if newProps.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn && d.Get("wait_for_guest_net").(bool) {
+		// We also need to wait for the guest networking to ensure an accurate set
+		// of information can be read into state and reported to the provisioners.
+		log.Printf("[DEBUG] Waiting for routeable guest network access")
+		if err := waitForGuestVMNet(client, newVM); err != nil {
+			return err
+		}
+		log.Printf("[DEBUG] Guest has routeable network access.")
+	}
 	return resourceVSphereVirtualMachineRead(d, meta)
 }
 
@@ -971,26 +1021,9 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 		log.Printf("[DEBUG] Set the moid: %#v", vm.Reference().Value)
 	}
 
-	state, err := vm.PowerState(context.TODO())
-	if err != nil {
-		return err
-	}
-
-	if state == types.VirtualMachinePowerStatePoweredOn {
-		// wait for interfaces to appear
-		log.Printf("[DEBUG] Waiting for interfaces to appear")
-
-		_, err = vm.WaitForNetIP(context.TODO(), false)
-		if err != nil {
-			return err
-		}
-
-		log.Printf("[DEBUG] Successfully waited for interfaces to appear")
-	}
-
 	var mvm mo.VirtualMachine
 	collector := property.DefaultCollector(client.Client)
-	if err := collector.RetrieveOne(context.TODO(), vm.Reference(), []string{"guest", "summary", "datastore", "config"}, &mvm); err != nil {
+	if err := collector.RetrieveOne(context.TODO(), vm.Reference(), []string{"guest", "summary", "datastore", "config", "runtime"}, &mvm); err != nil {
 		return err
 	}
 
@@ -1195,6 +1228,7 @@ func resourceVSphereVirtualMachineRead(d *schema.ResourceData, meta interface{})
 	d.Set("datastore", rootDatastore)
 	d.Set("uuid", mvm.Summary.Config.Uuid)
 	d.Set("annotation", mvm.Summary.Config.Annotation)
+	d.Set("power_state", mvm.Runtime.PowerState)
 
 	return nil
 }
@@ -1758,6 +1792,7 @@ func createCdroms(client *govmomi.Client, vm *object.VirtualMachine, datacenter 
 }
 
 func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
+	var cw *virtualMachineCustomizationWaiter
 	dc, err := getDatacenter(c, vm.datacenter)
 
 	if err != nil {
@@ -2187,6 +2222,7 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		log.Printf("[DEBUG] custom spec: %v", customSpec)
 
 		log.Printf("[DEBUG] VM customization starting")
+		cw = newVirtualMachineCustomizationWaiter(c, newVM)
 		taskb, err := newVM.Customize(context.TODO(), customSpec)
 		if err != nil {
 			return err
@@ -2195,7 +2231,6 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("[DEBUG] VM customization finished")
 	}
 
 	if vm.hasBootableVmdk || vm.template != "" {
@@ -2211,9 +2246,22 @@ func (vm *virtualMachine) setupVirtualMachine(c *govmomi.Client) error {
 		if err != nil {
 			return err
 		}
+		if cw != nil {
+			// Customization is not yet done here 100%. We need to wait for the
+			// customization completion events to confirm, so start listening for those
+			// now.
+			<-cw.Done()
+			if cw.Err() != nil {
+				return cw.Err()
+			}
+			log.Printf("[DEBUG] VM customization finished")
+		}
 	}
+
+	vm.moid = newVM.Reference().Value
 	return nil
 }
+
 func getNetworkName(c *govmomi.Client, vm *object.VirtualMachine, nic types.BaseVirtualEthernetCard) (string, error) {
 	backingInfo := nic.GetVirtualEthernetCard().Backing
 	var deviceName string
