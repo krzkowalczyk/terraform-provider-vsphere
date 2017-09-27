@@ -9,7 +9,6 @@ import (
 
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/vim25/types"
 )
 
@@ -84,6 +83,10 @@ func resourceVSphereVmfsDatastore() *schema.Resource {
 		},
 	}
 	mergeSchema(s, schemaDatastoreSummary())
+
+	// Add tags schema
+	s[vSphereTagAttributeKey] = tagsSchema()
+
 	return &schema.Resource{
 		Create: resourceVSphereVmfsDatastoreCreate,
 		Read:   resourceVSphereVmfsDatastoreRead,
@@ -97,7 +100,15 @@ func resourceVSphereVmfsDatastore() *schema.Resource {
 }
 
 func resourceVSphereVmfsDatastoreCreate(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
+
+	// Load up the tags client, which will validate a proper vCenter before
+	// attempting to proceed if we have tags defined.
+	tagsClient, err := tagsClientIfDefined(d, meta)
+	if err != nil {
+		return err
+	}
+
 	hsID := d.Get("host_system_id").(string)
 	dss, err := hostDatastoreSystemFromHostSystemID(client, hsID)
 	if err != nil {
@@ -135,6 +146,13 @@ func resourceVSphereVmfsDatastoreCreate(d *schema.ResourceData, meta interface{}
 		}
 	}
 
+	// Apply any pending tags now
+	if tagsClient != nil {
+		if err := processTagDiff(tagsClient, d, ds); err != nil {
+			return err
+		}
+	}
+
 	// Now add any remaining disks.
 	for _, disk := range disks[1:] {
 		spec, err := diskSpecForExtend(dss, ds, disk.(string))
@@ -168,7 +186,7 @@ func resourceVSphereVmfsDatastoreCreate(d *schema.ResourceData, meta interface{}
 }
 
 func resourceVSphereVmfsDatastoreRead(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
 	id := d.Id()
 	ds, err := datastoreFromID(client, id)
 	if err != nil {
@@ -198,11 +216,26 @@ func resourceVSphereVmfsDatastoreRead(d *schema.ResourceData, meta interface{}) 
 		return err
 	}
 
+	// Read tags if we have the ability to do so
+	if tagsClient, _ := meta.(*VSphereClient).TagsClient(); tagsClient != nil {
+		if err := readTagsForResource(tagsClient, ds, d); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
 func resourceVSphereVmfsDatastoreUpdate(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
+
+	// Load up the tags client, which will validate a proper vCenter before
+	// attempting to proceed if we have tags defined.
+	tagsClient, err := tagsClientIfDefined(d, meta)
+	if err != nil {
+		return err
+	}
+
 	hsID := d.Get("host_system_id").(string)
 	dss, err := hostDatastoreSystemFromHostSystemID(client, hsID)
 	if err != nil {
@@ -227,6 +260,13 @@ func resourceVSphereVmfsDatastoreUpdate(d *schema.ResourceData, meta interface{}
 		folder := d.Get("folder").(string)
 		if err := moveDatastoreToFolder(client, ds, folder); err != nil {
 			return fmt.Errorf("Could not move datastore to folder %q: %s", folder, err)
+		}
+	}
+
+	// Apply any pending tags now
+	if tagsClient != nil {
+		if err := processTagDiff(tagsClient, d, ds); err != nil {
+			return err
 		}
 	}
 
@@ -273,7 +313,7 @@ func resourceVSphereVmfsDatastoreUpdate(d *schema.ResourceData, meta interface{}
 }
 
 func resourceVSphereVmfsDatastoreDelete(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
 	hsID := d.Get("host_system_id").(string)
 	dss, err := hostDatastoreSystemFromHostSystemID(client, hsID)
 	if err != nil {
@@ -367,7 +407,7 @@ func resourceVSphereVmfsDatastoreImport(d *schema.ResourceData, meta interface{}
 
 	id := ids[0]
 	hsID := ids[1]
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
 	ds, err := datastoreFromID(client, id)
 	if err != nil {
 		return nil, fmt.Errorf("cannot find datastore: %s", err)

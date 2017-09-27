@@ -14,12 +14,16 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
+	"github.com/vmware/vic/pkg/vsphere/tags"
 )
 
 // testCheckVariables bundles common variables needed by various test checkers.
 type testCheckVariables struct {
 	// A client for various operations.
 	client *govmomi.Client
+
+	// The client for tagging operations.
+	tagsClient *tags.RestClient
 
 	// The subject resource's ID.
 	resourceID string
@@ -44,7 +48,8 @@ func testClientVariablesForResource(s *terraform.State, addr string) (testCheckV
 	}
 
 	return testCheckVariables{
-		client:             testAccProvider.Meta().(*govmomi.Client),
+		client:             testAccProvider.Meta().(*VSphereClient).vimClient,
+		tagsClient:         testAccProvider.Meta().(*VSphereClient).tagsClient,
 		resourceID:         rs.Primary.ID,
 		resourceAttributes: rs.Primary.Attributes,
 		esxiHost:           os.Getenv("VSPHERE_ESXI_HOST"),
@@ -80,6 +85,16 @@ func expectErrorIfNotVirtualCenter() *regexp.Regexp {
 		return regexp.MustCompile(errVirtualCenterOnly)
 	}
 	return nil
+}
+
+// copyStatePtr returns a TestCheckFunc that copies the reference to the test
+// run's state to t. This allows access to the state data in later steps where
+// it's not normally accessible (ie: in pre-config parts in another test step).
+func copyStatePtr(t **terraform.State) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		*t = s
+		return nil
+	}
 }
 
 // testGetPortGroup is a convenience method to fetch a static port group
@@ -148,12 +163,133 @@ func testPowerOffVM(s *terraform.State, resourceName string) error {
 	return nil
 }
 
-// copyStatePtr returns a TestCheckFunc that copies the reference to the test
-// run's state to t. This allows access to the state data in later steps where
-// it's not normally accessible (ie: in pre-config parts in another test step).
-func copyStatePtr(t **terraform.State) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		*t = s
-		return nil
+// testGetTagCategory gets a tag category by name.
+func testGetTagCategory(s *terraform.State, resourceName string) (*tags.Category, error) {
+	tVars, err := testClientVariablesForResource(s, fmt.Sprintf("vsphere_tag_category.%s", resourceName))
+	if err != nil {
+		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+	category, err := tVars.tagsClient.GetCategory(ctx, tVars.resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("could not get tag category for ID %q: %s", tVars.resourceID, err)
+	}
+
+	return category, nil
+}
+
+// testGetTag gets a tag by name.
+func testGetTag(s *terraform.State, resourceName string) (*tags.Tag, error) {
+	tVars, err := testClientVariablesForResource(s, fmt.Sprintf("vsphere_tag.%s", resourceName))
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+	tag, err := tVars.tagsClient.GetTag(ctx, tVars.resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("could not get tag for ID %q: %s", tVars.resourceID, err)
+	}
+
+	return tag, nil
+}
+
+// testObjectHasTags checks an object to see if it has the tags that currently
+// exist in the Terrafrom state under the resource with the supplied name.
+func testObjectHasTags(s *terraform.State, client *tags.RestClient, obj object.Reference, tagResName string) error {
+	var expectedIDs []string
+	if tagRS, ok := s.RootModule().Resources[fmt.Sprintf("vsphere_tag.%s", tagResName)]; ok {
+		expectedIDs = append(expectedIDs, tagRS.Primary.ID)
+	} else {
+		var n int
+		for {
+			multiTagRS, ok := s.RootModule().Resources[fmt.Sprintf("vsphere_tag.%s.%d", tagResName, n)]
+			if !ok {
+				break
+			}
+			expectedIDs = append(expectedIDs, multiTagRS.Primary.ID)
+			n++
+		}
+	}
+	if len(expectedIDs) < 1 {
+		return fmt.Errorf("could not find state for vsphere_tag.%s or vsphere_tag.%s.*", tagResName, tagResName)
+	}
+
+	objID := obj.Reference().Value
+	objType, err := tagTypeForObject(obj)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+	actualIDs, err := client.ListAttachedTags(ctx, objID, objType)
+	if err != nil {
+		return err
+	}
+
+	for _, expectedID := range expectedIDs {
+		var found bool
+		for _, actualID := range actualIDs {
+			if expectedID == actualID {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("could not find expected tag ID %q attached to object %q", expectedID, obj.Reference().Value)
+		}
+	}
+
+	return nil
+}
+
+// testGetDatastore gets the datastore at the supplied full address. This
+// function works for multiple datastore resources (example:
+// vsphere_nas_datastore and vsphere_vmfs_datastore), hence the need for the
+// full resource address including the resource type.
+func testGetDatastore(s *terraform.State, resAddr string) (*object.Datastore, error) {
+	vars, err := testClientVariablesForResource(s, resAddr)
+	if err != nil {
+		return nil, err
+	}
+	return datastoreFromID(vars.client, vars.resourceID)
+}
+
+// testAccResourceVSphereDatastoreCheckTags is a check to ensure that the
+// supplied datastore has had the tags that have been created with the supplied
+// tag resource name attached.
+//
+// The full datastore resource address is needed as this functions across
+// multiple datastore resource types.
+func testAccResourceVSphereDatastoreCheckTags(dsResAddr, tagResName string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		ds, err := testGetDatastore(s, dsResAddr)
+		if err != nil {
+			return err
+		}
+		tagsClient, err := testAccProvider.Meta().(*VSphereClient).TagsClient()
+		if err != nil {
+			return err
+		}
+		return testObjectHasTags(s, tagsClient, ds, tagResName)
+	}
+}
+
+// testGetFolder is a convenience method to fetch a folder by resource name.
+func testGetFolder(s *terraform.State, resourceName string) (*object.Folder, error) {
+	tVars, err := testClientVariablesForResource(s, fmt.Sprintf("vsphere_folder.%s", resourceName))
+	if err != nil {
+		return nil, err
+	}
+	return folderFromID(tVars.client, tVars.resourceID)
+}
+
+// testGetFolderProperties is a convenience method that adds an extra step to
+// testGetFolder to get the properties of a folder.
+func testGetFolderProperties(s *terraform.State, resourceName string) (*mo.Folder, error) {
+	folder, err := testGetFolder(s, resourceName)
+	if err != nil {
+		return nil, err
+	}
+	return folderProperties(folder)
 }

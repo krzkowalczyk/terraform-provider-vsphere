@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/vim25/types"
 )
 
@@ -37,6 +36,9 @@ func resourceVSphereNasDatastore() *schema.Resource {
 	mergeSchema(s, schemaHostNasVolumeSpec())
 	mergeSchema(s, schemaDatastoreSummary())
 
+	// Add tags schema
+	s[vSphereTagAttributeKey] = tagsSchema()
+
 	return &schema.Resource{
 		Create: resourceVSphereNasDatastoreCreate,
 		Read:   resourceVSphereNasDatastoreRead,
@@ -50,7 +52,15 @@ func resourceVSphereNasDatastore() *schema.Resource {
 }
 
 func resourceVSphereNasDatastoreCreate(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
+
+	// Load up the tags client, which will validate a proper vCenter before
+	// attempting to proceed if we have tags defined.
+	tagsClient, err := tagsClientIfDefined(d, meta)
+	if err != nil {
+		return err
+	}
+
 	hosts := sliceInterfacesToStrings(d.Get("host_system_ids").(*schema.Set).List())
 	p := &nasDatastoreMountProcessor{
 		client:   client,
@@ -74,12 +84,19 @@ func resourceVSphereNasDatastoreCreate(d *schema.ResourceData, meta interface{})
 		}
 	}
 
+	// Apply any pending tags now
+	if tagsClient != nil {
+		if err := processTagDiff(tagsClient, d, ds); err != nil {
+			return err
+		}
+	}
+
 	// Done
 	return resourceVSphereNasDatastoreRead(d, meta)
 }
 
 func resourceVSphereNasDatastoreRead(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
 	id := d.Id()
 	ds, err := datastoreFromID(client, id)
 	if err != nil {
@@ -114,11 +131,26 @@ func resourceVSphereNasDatastoreRead(d *schema.ResourceData, meta interface{}) e
 		return err
 	}
 
+	// Read tags if we have the ability to do so
+	if tagsClient, _ := meta.(*VSphereClient).TagsClient(); tagsClient != nil {
+		if err := readTagsForResource(tagsClient, ds, d); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
 func resourceVSphereNasDatastoreUpdate(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
+
+	// Load up the tags client, which will validate a proper vCenter before
+	// attempting to proceed if we have tags defined.
+	tagsClient, err := tagsClientIfDefined(d, meta)
+	if err != nil {
+		return err
+	}
+
 	id := d.Id()
 	ds, err := datastoreFromID(client, id)
 	if err != nil {
@@ -137,6 +169,13 @@ func resourceVSphereNasDatastoreUpdate(d *schema.ResourceData, meta interface{})
 		folder := d.Get("folder").(string)
 		if err := moveDatastoreToFolder(client, ds, folder); err != nil {
 			return fmt.Errorf("could not move datastore to folder %q: %s", folder, err)
+		}
+	}
+
+	// Apply any pending tags now
+	if tagsClient != nil {
+		if err := processTagDiff(tagsClient, d, ds); err != nil {
+			return err
 		}
 	}
 
@@ -164,7 +203,7 @@ func resourceVSphereNasDatastoreUpdate(d *schema.ResourceData, meta interface{})
 }
 
 func resourceVSphereNasDatastoreDelete(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
 	dsID := d.Id()
 	ds, err := datastoreFromID(client, dsID)
 	if err != nil {
@@ -192,7 +231,7 @@ func resourceVSphereNasDatastoreImport(d *schema.ResourceData, meta interface{})
 	// We support importing a MoRef - so we need to load the datastore and check
 	// to make sure 1) it exists, and 2) it's a VMFS datastore. If it is, we are
 	// good to go (rest of the stuff will be handled by read on refresh).
-	client := meta.(*govmomi.Client)
+	client := meta.(*VSphereClient).vimClient
 	id := d.Id()
 	ds, err := datastoreFromID(client, id)
 	if err != nil {
